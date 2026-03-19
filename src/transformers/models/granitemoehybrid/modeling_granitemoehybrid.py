@@ -638,7 +638,13 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         input_states,
         cache_params: HybridMambaAttentionDynamicCache | None = None,
         attention_mask: torch.Tensor | None = None,
-    ):
+    ):  
+        if self.layer_idx == 0:
+            hidden_states = input_states
+            print(f"entered GraniteMoeHybridMambaLayer {self.layer_idx}")
+            print(f"layer_idx: {self.layer_idx} hidden_states: {hidden_states.shape}, dtype: {hidden_states.dtype},\
+                device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
+        
         batch_size, seq_len, _ = input_states.shape
         dtype = input_states.dtype
 
@@ -648,7 +654,11 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         gate, hidden_states_B_C, dt = projected_states.split(
                 [self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
         )
-
+        print(f"[mamba layer] gate: {gate.shape}, dtype: {gate.dtype}, device: {gate.device}, mean: {gate.mean():.8f}, std: {gate.std():.8f}, sum: {gate.sum():.8f}")
+        print(f"[mamba layer] hidden_states_B_C: {hidden_states_B_C.shape}, dtype: {hidden_states_B_C.dtype}, device: {hidden_states_B_C.device}, mean: {hidden_states_B_C.mean():.8f}, std: {hidden_states_B_C.std():.8f}, sum: {hidden_states_B_C.sum():.8f}")
+        print(f"[mamba layer] dt: {dt.shape}, dtype: {dt.dtype}, device: {dt.device}, mean: {dt.mean():.8f}, std: {dt.std():.8f}, sum: {dt.sum():.8f}")
+        print(f"[mamba layer] conv_weights: {self.conv1d.weight.shape}, dtype: {self.conv1d.weight.dtype}, device: {self.conv1d.weight.device}, mean: {self.conv1d.weight.mean():.8f}, std: {self.conv1d.weight.std():.8f}, sum: {self.conv1d.weight.sum():.8f}")
+        
         use_precomputed_states = (
             cache_params is not None
             and cache_params.has_previous_state
@@ -692,6 +702,13 @@ class GraniteMoeHybridMambaLayer(nn.Module):
 
         # 3. SSM transformation
         A = -torch.exp(self.A_log.float())                            # [num_heads]
+        if self.layer_idx == 0:
+            print(f"[mamba layer] hidden_states: {hidden_states.shape}, dtype: {hidden_states.dtype}, device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
+            print(f"[mamba layer] A: {A.shape}, dtype: {A.dtype}, device: {A.device}, mean: {A.mean():.8f}, std: {A.std():.8f}, sum: {A.sum():.8f}")
+            print(f"[mamba layer] B: {B.shape}, dtype: {B.dtype}, device: {B.device}, mean: {B.mean():.8f}, std: {B.std():.8f}, sum: {B.sum():.8f}")
+            print(f"[mamba layer] C: {C.shape}, dtype: {C.dtype}, device: {C.device}, mean: {C.mean():.8f}, std: {C.std():.8f}, sum: {C.sum():.8f}")
+            print(f"[mamba layer] D: {self.D.shape}, dtype: {self.D.dtype}, device: {self.D.device}, mean: {self.D.mean():.8f}, std: {self.D.std():.8f}, sum: {self.D.sum():.8f}")
+            print(f"[mamba layer] dt_bias: {self.dt_bias.shape}, dtype: {self.dt_bias.dtype}, device: {self.dt_bias.device}, mean: {self.dt_bias.mean():.8f}, std: {self.dt_bias.std():.8f}, sum: {self.dt_bias.sum():.8f}")
         if use_precomputed_states:
             # We need to guarantee that anything regarding the cache is on the same device
             cache_device = cache_params.ssm_states[self.layer_idx].device
@@ -750,20 +767,31 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             # [bsz, num_heads, head_dim] -> [bsz, 1, intermediate_size]
             y = y.reshape(batch_size, -1)[:, None, ...]
         else:
+            print(f"[chunk_cumsum] A, shape: {A.shape}, dtype: {A.dtype}, device: {A.device}, mean: {A.mean():.8f}, std: {A.std():.8f}, sum: {A.sum():.8f}")
+            print(f"[chunk_cumsum] dt, shape: {dt.shape}, dtype: {dt.dtype}, device: {dt.device}, mean: {dt.mean():.8f}, std: {dt.std():.8f}, sum: {dt.sum():.8f}")
             # begin ssd naive implementation without einsums
-            dt = nn.functional.softplus(dt + self.dt_bias)
-            dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
+            dt_fp32 = dt.to(torch.float32)
+            dt_bias_fp32 = self.dt_bias.to(torch.float32)
+            dt_fp32 = nn.functional.softplus(dt_fp32 + dt_bias_fp32)
+            dt_fp32 = torch.clamp(dt_fp32, self.time_step_limit[0], self.time_step_limit[1])
+            #dt = nn.functional.softplus(dt + self.dt_bias)
+            #dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
+            dt = dt_fp32
+            B_before = B
+            x = hidden_states
             hidden_states = hidden_states.reshape(batch_size, seq_len, -1, self.head_dim).float()
             B = B.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
             C = C.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
             B = B.repeat_interleave(self.num_heads // self.n_groups, dim=2, output_size=self.num_heads)
             C = C.repeat_interleave(self.num_heads // self.n_groups, dim=2, output_size=self.num_heads)
+            print(f"[mamba layer] chunk_size: {self.chunk_size}")
             pad_size = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
 
             D_residual = self.D[..., None] * pad_tensor_by_size(hidden_states, pad_size)
 
             # Discretize x and A
             hidden_states = hidden_states * dt[..., None]
+            print(f"[chunk_cumsum] hidden_states, shape: {hidden_states.shape}, dtype: {hidden_states.dtype}, device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
             A = A.to(hidden_states.dtype) * dt
 
             # Rearrange into blocks/chunks
@@ -772,9 +800,12 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             # [bsz, -1, chunk_size, num_heads] -> [bsz, num_heads, -1, chunk_size]
             A = A.permute(0, 3, 1, 2)
             A_cumsum = torch.cumsum(A, dim=-1)
-
+            print(f"[chunk_cumsum] A_cumsum, shape: {A_cumsum.shape}, dtype: {A_cumsum.dtype}, device: {A_cumsum.device}, mean: {A_cumsum.mean():.8f}, std: {A_cumsum.std():.8f}, sum: {A_cumsum.sum():.8f}")
+            print(f"[chunk_cumsum] dt, shape: {dt.shape}, dtype: {dt.dtype}, device: {dt.device}, mean: {dt.mean():.8f}, std: {dt.std():.8f}, sum: {dt.sum():.8f}")
             # 1. Compute the output for each intra-chunk (diagonal blocks)
             # This is the analog of a causal mask
+            print(f"[chunk_state_fwd] B, shape: {B.shape}, dtype: {B.dtype}, device: {B.device}, mean: {B.mean():.8f}, std: {B.std():.8f}, sum: {B.sum():.8f}")
+            print(f"[chunk_state_fwd] x, shape: {x.shape}, dtype: {x.dtype}, device: {x.device}, mean: {x.mean():.8f}, std: {x.std():.8f}, sum: {x.sum():.8f}")
             L = torch.exp(segment_sum(A))
 
             # Contraction of C and B to get G (attention-weights like)
@@ -793,9 +824,11 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             decay_states = torch.exp(A_cumsum[:, :, :, -1:] - A_cumsum)
             B_decay = B * decay_states.permute(0, -2, -1, 1)[..., None]
             states = (B_decay[..., None, :] * hidden_states[..., None]).sum(dim=2)
+            print(f"[chunk_state_fwd] states, shape: {states.shape}, dtype: {states.dtype}, device: {states.device}, mean: {states.mean():.8f}, std: {states.std():.8f}, sum: {states.sum():.8f}")
 
             # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
             # (middle term of factorization of off-diag blocks; A terms)
+            print(f"[state_passing_fwd] A_cumsum, shape: {A_cumsum.shape}, dtype: {A_cumsum.dtype}, device: {A_cumsum.device}, mean: {A_cumsum.mean():.8f}, std: {A_cumsum.std():.8f}, sum: {A_cumsum.sum():.8f}")
             if use_precomputed_states:
                 previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
             else:
@@ -805,7 +838,8 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             decay_chunk = decay_chunk.transpose(1, 3)
             new_states = (decay_chunk[..., None, None] * states[:, :, None, ...]).sum(dim=1)
             states, ssm_state = new_states[:, :-1], new_states[:, -1]
-
+            print(f"[state_passing_fwd] states, shape: {states.shape}, dtype: {states.dtype}, device: {states.device}, mean: {states.mean():.8f}, std: {states.std():.8f}, sum: {states.sum():.8f}")
+            print(f"[state_passing_fwd] final_states, shape: {states.shape}, dtype: {states.dtype}, device: {states.device}, mean: {states.mean():.8f}, std: {states.std():.8f}, sum: {states.sum():.8f}")
             # 4. Compute state -> output conversion per chunk
             # (left term of low-rank factorization of off-diagonal blocks; C terms)
             state_decay_out = torch.exp(A_cumsum)
@@ -827,9 +861,12 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             # Init cache
             if ssm_state is not None and cache_params is not None:
                 cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
-
+        if self.layer_idx == 0:
+            print(f"[mamba layer] input y, shape: {y.shape}, dtype: {y.dtype}, device: {y.device}, mean: {y.mean():.8f}, std: {y.std():.8f}, sum: {y.sum():.8f}")
+            print(f"[mamba layer] input gate, shape: {gate.shape}, dtype: {gate.dtype}, device: {gate.device}, mean: {gate.mean():.8f}, std: {gate.std():.8f}, sum: {gate.sum():.8f}")
         scan_output = self.norm(y, gate)
-
+        if self.layer_idx == 0:
+            print(f"[mamba layer] output scan_output, shape: {scan_output.shape}, dtype: {scan_output.dtype}, device: {scan_output.device}, mean: {scan_output.mean():.8f}, std: {scan_output.std():.8f}, sum: {scan_output.sum():.8f}")
         # end ssd naive
 
         # 4. Final linear projection
@@ -1144,11 +1181,16 @@ class GraniteMoeHybridRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        x = hidden_states
+        print(f"input x shape: {x.shape}, dtype: {x.dtype}, device: {x.device}, mean: {x.mean():.8f}, std: {x.std():.8f}, sum: {x.sum():.8f}")
+        print(f"self.weight shape: {self.weight.shape}, dtype: {self.weight.dtype}, device: {self.weight.device}, mean: {self.weight.mean():.8f}, std: {self.weight.std():.8f}, sum: {self.weight.sum():.8f}")
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        x = self.weight * hidden_states.to(input_dtype)
+        print(f"output x shape: {x.shape}, dtype: {x.dtype}, device: {x.device}, mean: {x.mean():.8f}, std: {x.std():.8f}, sum: {x.sum():.8f}")
+        return x
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -1188,9 +1230,15 @@ class GraniteMoeHybridDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[GraniteFlashAttentionKwargs],
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
+        if self.layer_idx == 0:
+            print(f"entered GraniteMoeHybridDecoderLayer layer {self.layer_idx}")
+            print(f"layer_idx {self.layer_idx} hidden_states shape: {hidden_states.shape}, dtype: {hidden_states.dtype}, \
+                 device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
+        if self.layer_idx == 0:
+            print(f"after input layernorm, hidden_states shape: {hidden_states.shape}, dtype: {hidden_states.dtype}, \
+                 device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
         if self.mamba is not None:
             hidden_states = self.mamba(
                 hidden_states=hidden_states,
@@ -1261,6 +1309,7 @@ class GraniteMoeHybridModel(GraniteMoeHybridPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        print(f"config.num_hidden_layers: {config.num_hidden_layers}")
         self.layers = nn.ModuleList(
             [GraniteMoeHybridDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -1285,6 +1334,8 @@ class GraniteMoeHybridModel(GraniteMoeHybridPreTrainedModel):
         use_cache: bool | None = None,
         **kwargs: Unpack[GraniteFlashAttentionKwargs],
     ) -> tuple | BaseModelOutputWithPast:
+        print(f"input_ids: {input_ids.shape}, dtype: {input_ids.dtype}, device: {input_ids.device}, mean: {input_ids.mean():.8f}, std: {input_ids.std():.8f}, sum: {input_ids.sum():.8f}")
+        print(f"position_ids: {position_ids.shape}, dtype: {position_ids.dtype}, device: {position_ids.device}, mean: {position_ids.mean():.8f}, std: {position_ids.std():.8f}, sum: {position_ids.sum():.8f}")
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
