@@ -1334,7 +1334,7 @@ class GraniteMoeHybridModel(GraniteMoeHybridPreTrainedModel):
         use_cache: bool | None = None,
         **kwargs: Unpack[GraniteFlashAttentionKwargs],
     ) -> tuple | BaseModelOutputWithPast:
-        print(f"input_ids: {input_ids.shape}, dtype: {input_ids.dtype}, device: {input_ids.device}, mean: {input_ids.mean():.8f}, std: {input_ids.std():.8f}, sum: {input_ids.sum():.8f}")
+        print(f"input_ids: {input_ids.shape}, dtype: {input_ids.dtype}, device: {input_ids.device}, mean: {input_ids.mean():.8f}, sum: {input_ids.sum():.8f}")
         print(f"position_ids: {position_ids.shape}, dtype: {position_ids.dtype}, device: {position_ids.device}, mean: {position_ids.mean():.8f}, std: {position_ids.std():.8f}, sum: {position_ids.sum():.8f}")
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
