@@ -1219,7 +1219,8 @@ class GraniteMoeHybridDecoderLayer(GradientCheckpointingLayer):
 
         # Accept 0 experts: skip MoE if num_local_experts == 0
         self.has_experts = getattr(config, "num_local_experts", 0) > 0
-
+        self.layer_idx = layer_idx
+        
     @auto_docstring
     def forward(
         self,
