@@ -153,12 +153,18 @@ class GraniteMoeHybridAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,  # None or rope embeddings
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        print(f"[Attention] layer {self.layer_idx}")
+        print(f"[Attention] hidden_states, shape: {hidden_states.shape}, dtype: {hidden_states.dtype}, device: {hidden_states.device}, mean: {hidden_states.mean().item():.8f}, std: {hidden_states.std().item():.8f}, sum: {hidden_states.sum().item():.8f}")
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        print(f"[Attention] query, shape: {query_states.shape}, dtype: {query_states.dtype}, device: {query_states.device}, mean: {query_states.mean().item():.8f}, std: {query_states.std().item():.8f}, sum: {query_states.sum().item():.8f}")
+        print(f"[Attention] key, shape: {key_states.shape}, dtype: {key_states.dtype}, device: {key_states.device}, mean: {key_states.mean().item():.8f}, std: {key_states.std().item():.8f}, sum: {key_states.sum().item():.8f}")
+        print(f"[Attention] value, shape: {value_states.shape}, dtype: {value_states.dtype}, device: {value_states.device}, mean: {value_states.mean().item():.8f}, std: {value_states.std().item():.8f}, sum: {value_states.sum().item():.8f}")
+
 
         if position_embeddings is not None:
             cos, sin = position_embeddings
@@ -170,6 +176,9 @@ class GraniteMoeHybridAttention(nn.Module):
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
         )
+        print(f"[Attention] query, shape: {query_states.shape}, dtype: {query_states.dtype}, device: {query_states.device}, mean: {query_states.mean().item():.8f}, std: {query_states.std().item():.8f}, sum: {query_states.sum().item():.8f}")
+        print(f"[Attention] key, shape: {key_states.shape}, dtype: {key_states.dtype}, device: {key_states.device}, mean: {key_states.mean().item():.8f}, std: {key_states.std().item():.8f}, sum: {key_states.sum().item():.8f}")
+        print(f"[Attention] value, shape: {value_states.shape}, dtype: {value_states.dtype}, device: {value_states.device}, mean: {value_states.mean().item():.8f}, std: {value_states.std().item():.8f}, sum: {value_states.sum().item():.8f}")
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -181,9 +190,11 @@ class GraniteMoeHybridAttention(nn.Module):
             scaling=self.scaling,
             **kwargs,
         )
-
+        print(f"[Attention] +++++ after attn hidden_states, shape: {attn_output.shape}, dtype: {attn_output.dtype}, device: {attn_output.device}, mean: {attn_output.mean().item():.8f}, std: {attn_output.std().item():.8f}, sum: {attn_output.sum().item():.8f}")
+        
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        print(f"[Attention] +++++ after attn hidden_states, shape: {attn_output.shape}, dtype: {attn_output.dtype}, device: {attn_output.device}, mean: {attn_output.mean().item():.8f}, std: {attn_output.std().item():.8f}, sum: {attn_output.sum().item():.8f}")
         return attn_output, attn_weights
 
 
@@ -669,6 +680,7 @@ class GraniteMoeHybridMambaLayer(nn.Module):
         )
 
         # 2. Convolution sequence transformation
+        print(f"[mamba layer] hidden_states_B_C_d shape: {hidden_states_B_C.shape}, dtype: {hidden_states_B_C.dtype}, device: {hidden_states_B_C.device}, mean: {hidden_states_B_C.mean().item():.8f}, std: {hidden_states_B_C.std().item():.8f}, sum: {hidden_states_B_C.sum().item():.8f}")
         if use_precomputed_states:
             cache_params.conv_states[self.layer_idx] = cache_params.conv_states[self.layer_idx].roll(shifts=-1, dims=-1)
             cache_params.conv_states[self.layer_idx][:, :, -1] = hidden_states_B_C[:, 0, :].to(cache_params.conv_states[self.layer_idx].device)
@@ -699,6 +711,7 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             [self.intermediate_size, self.n_groups * self.ssm_state_size, self.n_groups * self.ssm_state_size],
             dim=-1
         )
+        print(f"[mamba layer] hidden_states_B_C_d shape: {hidden_states_B_C.shape}, dtype: {hidden_states_B_C.dtype}, device: {hidden_states_B_C.device}, mean: {hidden_states_B_C.mean().item():.8f}, std: {hidden_states_B_C.std().item():.8f}, sum: {hidden_states_B_C.sum().item():.8f}")
 
         # 3. SSM transformation
         A = -torch.exp(self.A_log.float())                            # [num_heads]
@@ -770,13 +783,13 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             print(f"[chunk_cumsum] A, shape: {A.shape}, dtype: {A.dtype}, device: {A.device}, mean: {A.mean():.8f}, std: {A.std():.8f}, sum: {A.sum():.8f}")
             print(f"[chunk_cumsum] dt, shape: {dt.shape}, dtype: {dt.dtype}, device: {dt.device}, mean: {dt.mean():.8f}, std: {dt.std():.8f}, sum: {dt.sum():.8f}")
             # begin ssd naive implementation without einsums
-            dt_fp32 = dt.to(torch.float32)
-            dt_bias_fp32 = self.dt_bias.to(torch.float32)
-            dt_fp32 = nn.functional.softplus(dt_fp32 + dt_bias_fp32)
-            dt_fp32 = torch.clamp(dt_fp32, self.time_step_limit[0], self.time_step_limit[1])
-            #dt = nn.functional.softplus(dt + self.dt_bias)
-            #dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
-            dt = dt_fp32
+            # dt_fp32 = dt.to(torch.float32)
+            # dt_bias_fp32 = self.dt_bias.to(torch.float32)
+            # dt_fp32 = nn.functional.softplus(dt_fp32 + dt_bias_fp32)
+            # dt_fp32 = torch.clamp(dt_fp32, self.time_step_limit[0], self.time_step_limit[1])
+            dt = nn.functional.softplus(dt + self.dt_bias)
+            dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
+            # dt = dt_fp32
             B_before = B
             x = hidden_states
             hidden_states = hidden_states.reshape(batch_size, seq_len, -1, self.head_dim).float()
@@ -839,7 +852,7 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             new_states = (decay_chunk[..., None, None] * states[:, :, None, ...]).sum(dim=1)
             states, ssm_state = new_states[:, :-1], new_states[:, -1]
             print(f"[state_passing_fwd] states, shape: {states.shape}, dtype: {states.dtype}, device: {states.device}, mean: {states.mean():.8f}, std: {states.std():.8f}, sum: {states.sum():.8f}")
-            print(f"[state_passing_fwd] final_states, shape: {states.shape}, dtype: {states.dtype}, device: {states.device}, mean: {states.mean():.8f}, std: {states.std():.8f}, sum: {states.sum():.8f}")
+            print(f"[state_passing_fwd] final_states, shape: {ssm_state.shape}, dtype: {ssm_state.dtype}, device: {ssm_state.device}, mean: {ssm_state.mean():.8f}, std: {ssm_state.std():.8f}, sum: {ssm_state.sum():.8f}")
             # 4. Compute state -> output conversion per chunk
             # (left term of low-rank factorization of off-diagonal blocks; C terms)
             state_decay_out = torch.exp(A_cumsum)
@@ -861,12 +874,11 @@ class GraniteMoeHybridMambaLayer(nn.Module):
             # Init cache
             if ssm_state is not None and cache_params is not None:
                 cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
-        if self.layer_idx == 0:
-            print(f"[mamba layer] input y, shape: {y.shape}, dtype: {y.dtype}, device: {y.device}, mean: {y.mean():.8f}, std: {y.std():.8f}, sum: {y.sum():.8f}")
-            print(f"[mamba layer] input gate, shape: {gate.shape}, dtype: {gate.dtype}, device: {gate.device}, mean: {gate.mean():.8f}, std: {gate.std():.8f}, sum: {gate.sum():.8f}")
+        print(f"[mamba layer] input y, shape: {y.shape}, dtype: {y.dtype}, device: {y.device}, mean: {y.mean():.8f}, std: {y.std():.8f}, sum: {y.sum():.8f}")
+        print(f"[mamba layer] input gate, shape: {gate.shape}, dtype: {gate.dtype}, device: {gate.device}, mean: {gate.mean():.8f}, std: {gate.std():.8f}, sum: {gate.sum():.8f}")
         scan_output = self.norm(y, gate)
-        if self.layer_idx == 0:
-            print(f"[mamba layer] output scan_output, shape: {scan_output.shape}, dtype: {scan_output.dtype}, device: {scan_output.device}, mean: {scan_output.mean():.8f}, std: {scan_output.std():.8f}, sum: {scan_output.sum():.8f}")
+        print(f"layer idx {self.layer_idx} ")
+        print(f"[mamba layer] output scan_output, shape: {scan_output.shape}, dtype: {scan_output.dtype}, device: {scan_output.device}, mean: {scan_output.mean():.8f}, std: {scan_output.std():.8f}, sum: {scan_output.sum():.8f}")
         # end ssd naive
 
         # 4. Final linear projection
@@ -1376,8 +1388,41 @@ class GraniteMoeHybridModel(GraniteMoeHybridPreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+        # print(f"[residual]")
+        # print(f"[residual] hidden_states, shape: {hidden_states.shape}, dtype: {hidden_states.dtype}, device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
+        # pruned_states0 = hidden_states[:,0,:]
+        # pruned_states1 = hidden_states[:,1,:]
+        # pruned_states2 = hidden_states[:,2,:]
+        # pruned_states3 = hidden_states[:,3,:]
+        # pruned_states4 = hidden_states[:,4,:]
+        # pruned_states5 = hidden_states[:,5,:]
+        # pruned_states6 = hidden_states[:,6,:]
+        # pruned_states7 = hidden_states[:,7,:]
+        # print(f"[residual] pruned_states0, shape: {pruned_states0.shape}, dtype: {pruned_states0.dtype}, device: {pruned_states0.device}, mean: {pruned_states0.mean():.8f}, std: {pruned_states0.std():.8f}, sum: {pruned_states0.sum():.8f}")
+        # print(f"[residual] pruned_states1, shape: {pruned_states1.shape}, dtype: {pruned_states1.dtype}, device: {pruned_states1.device}, mean: {pruned_states1.mean():.8f}, std: {pruned_states1.std():.8f}, sum: {pruned_states1.sum():.8f}")
+        # print(f"[residual] pruned_states2, shape: {pruned_states2.shape}, dtype: {pruned_states2.dtype}, device: {pruned_states2.device}, mean: {pruned_states2.mean():.8f}, std: {pruned_states2.std():.8f}, sum: {pruned_states2.sum():.8f}")
+        # print(f"[residual] pruned_states3, shape: {pruned_states3.shape}, dtype: {pruned_states3.dtype}, device: {pruned_states3.device}, mean: {pruned_states3.mean():.8f}, std: {pruned_states3.std():.8f}, sum: {pruned_states3.sum():.8f}")
+        # print(f"[residual] pruned_states4, shape: {pruned_states4.shape}, dtype: {pruned_states4.dtype}, device: {pruned_states4.device}, mean: {pruned_states4.mean():.8f}, std: {pruned_states4.std():.8f}, sum: {pruned_states4.sum():.8f}")
+        # print(f"[residual] pruned_states5, shape: {pruned_states5.shape}, dtype: {pruned_states5.dtype}, device: {pruned_states5.device}, mean: {pruned_states5.mean():.8f}, std: {pruned_states5.std():.8f}, sum: {pruned_states5.sum():.8f}")
+        # print(f"[residual] pruned_states6, shape: {pruned_states6.shape}, dtype: {pruned_states6.dtype}, device: {pruned_states6.device}, mean: {pruned_states6.mean():.8f}, std: {pruned_states6.std():.8f}, sum: {pruned_states6.sum():.8f}")
+        # print(f"[residual] pruned_states7, shape: {pruned_states7.shape}, dtype: {pruned_states7.dtype}, device: {pruned_states7.device}, mean: {pruned_states7.mean():.8f}, std: {pruned_states7.std():.8f}, sum: {pruned_states7.sum():.8f}")
         hidden_states = self.norm(hidden_states)
-
+        # pruned_states0 = hidden_states[:,0,:]
+        # pruned_states1 = hidden_states[:,1,:]
+        # pruned_states2 = hidden_states[:,2,:]
+        # pruned_states3 = hidden_states[:,3,:]
+        # pruned_states4 = hidden_states[:,4,:]
+        # pruned_states5 = hidden_states[:,5,:]
+        # pruned_states6 = hidden_states[:,6,:]
+        # pruned_states7 = hidden_states[:,7,:]
+        # print(f"[residual] pruned_states0, shape: {pruned_states0.shape}, dtype: {pruned_states0.dtype}, device: {pruned_states0.device}, mean: {pruned_states0.mean():.8f}, std: {pruned_states0.std():.8f}, sum: {pruned_states0.sum():.8f}")
+        # print(f"[residual] pruned_states1, shape: {pruned_states1.shape}, dtype: {pruned_states1.dtype}, device: {pruned_states1.device}, mean: {pruned_states1.mean():.8f}, std: {pruned_states1.std():.8f}, sum: {pruned_states1.sum():.8f}")
+        # print(f"[residual] pruned_states2, shape: {pruned_states2.shape}, dtype: {pruned_states2.dtype}, device: {pruned_states2.device}, mean: {pruned_states2.mean():.8f}, std: {pruned_states2.std():.8f}, sum: {pruned_states2.sum():.8f}")
+        # print(f"[residual] pruned_states3, shape: {pruned_states3.shape}, dtype: {pruned_states3.dtype}, device: {pruned_states3.device}, mean: {pruned_states3.mean():.8f}, std: {pruned_states3.std():.8f}, sum: {pruned_states3.sum():.8f}")
+        # print(f"[residual] pruned_states4, shape: {pruned_states4.shape}, dtype: {pruned_states4.dtype}, device: {pruned_states4.device}, mean: {pruned_states4.mean():.8f}, std: {pruned_states4.std():.8f}, sum: {pruned_states4.sum():.8f}")
+        # print(f"[residual] pruned_states5, shape: {pruned_states5.shape}, dtype: {pruned_states5.dtype}, device: {pruned_states5.device}, mean: {pruned_states5.mean():.8f}, std: {pruned_states5.std():.8f}, sum: {pruned_states5.sum():.8f}")
+        # print(f"[residual] pruned_states6, shape: {pruned_states6.shape}, dtype: {pruned_states6.dtype}, device: {pruned_states6.device}, mean: {pruned_states6.mean():.8f}, std: {pruned_states6.std():.8f}, sum: {pruned_states6.sum():.8f}")
+        # print(f"[residual] pruned_states7, shape: {pruned_states7.shape}, dtype: {pruned_states7.dtype}, device: {pruned_states7.device}, mean: {pruned_states7.mean():.8f}, std: {pruned_states7.std():.8f}, sum: {pruned_states7.sum():.8f}")
         if past_key_values and not past_key_values.has_previous_state:
             past_key_values.has_previous_state = True
 
@@ -1552,12 +1597,37 @@ class GraniteMoeHybridForCausalLM(GraniteMoeHybridPreTrainedModel, GenerationMix
 
         # Only compute necessary logits
         hidden_states = outputs.last_hidden_state
+        print(f"[forward] after self.model -> hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum().item():.8f}", flush=True)
+
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        print(f"[lm_head] input input_ids, shape: {input_ids.shape}, dtype: {input_ids.dtype}, device: {input_ids.device}, {input_ids}")
+        print(f"[lm_head] input hidden_states, shape: {hidden_states.shape}, dtype: {hidden_states.dtype}, device: {hidden_states.device}, mean: {hidden_states.mean():.8f}, std: {hidden_states.std():.8f}, sum: {hidden_states.sum():.8f}")
+        print(f"[lm_head] slice_indices, {slice_indices}")
+        # pruned_states0 = hidden_states[:,0,:]
+        # pruned_states1 = hidden_states[:,1,:]
+        # pruned_states2 = hidden_states[:,2,:]
+        # pruned_states3 = hidden_states[:,3,:]
+        # pruned_states4 = hidden_states[:,4,:]
+        # pruned_states5 = hidden_states[:,5,:]
+        # pruned_states6 = hidden_states[:,6,:]
+        # pruned_states7 = hidden_states[:,7,:]
+        # print(f"[lm_head] pruned_states0, shape: {pruned_states0.shape}, dtype: {pruned_states0.dtype}, device: {pruned_states0.device}, mean: {pruned_states0.mean():.8f}, std: {pruned_states0.std():.8f}, sum: {pruned_states0.sum():.8f}")
+        # print(f"[lm_head] pruned_states1, shape: {pruned_states1.shape}, dtype: {pruned_states1.dtype}, device: {pruned_states1.device}, mean: {pruned_states1.mean():.8f}, std: {pruned_states1.std():.8f}, sum: {pruned_states1.sum():.8f}")
+        # print(f"[lm_head] pruned_states2, shape: {pruned_states2.shape}, dtype: {pruned_states2.dtype}, device: {pruned_states2.device}, mean: {pruned_states2.mean():.8f}, std: {pruned_states2.std():.8f}, sum: {pruned_states2.sum():.8f}")
+        # print(f"[lm_head] pruned_states3, shape: {pruned_states3.shape}, dtype: {pruned_states3.dtype}, device: {pruned_states3.device}, mean: {pruned_states3.mean():.8f}, std: {pruned_states3.std():.8f}, sum: {pruned_states3.sum():.8f}")
+        # print(f"[lm_head] pruned_states4, shape: {pruned_states4.shape}, dtype: {pruned_states4.dtype}, device: {pruned_states4.device}, mean: {pruned_states4.mean():.8f}, std: {pruned_states4.std():.8f}, sum: {pruned_states4.sum():.8f}")
+        # print(f"[lm_head] pruned_states5, shape: {pruned_states5.shape}, dtype: {pruned_states5.dtype}, device: {pruned_states5.device}, mean: {pruned_states5.mean():.8f}, std: {pruned_states5.std():.8f}, sum: {pruned_states5.sum():.8f}")
+        # print(f"[lm_head] pruned_states6, shape: {pruned_states6.shape}, dtype: {pruned_states6.dtype}, device: {pruned_states6.device}, mean: {pruned_states6.mean():.8f}, std: {pruned_states6.std():.8f}, sum: {pruned_states6.sum():.8f}")
+        # print(f"[lm_head] pruned_states7, shape: {pruned_states7.shape}, dtype: {pruned_states7.dtype}, device: {pruned_states7.device}, mean: {pruned_states7.mean():.8f}, std: {pruned_states7.std():.8f}, sum: {pruned_states7.sum():.8f}")
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+        print(f"[lm_head] output logits, shape: {logits.shape}, dtype: {logits.dtype}, device: {logits.device}, mean: {logits.mean():.8f}, std: {logits.std():.8f}, sum: {logits.sum():.8f}")
         logits = logits / self.config.logits_scaling
+        print(f"[lm_head] self.config.logits_scaling, {self.config.logits_scaling}")
+        print(f"[lm_head] output logits, shape: {logits.shape}, dtype: {logits.dtype}, device: {logits.device}, mean: {logits.mean():.8f}, std: {logits.std():.8f}, sum: {logits.sum():.8f}")
 
         loss = None
         if labels is not None:
+            print("[lm_head] branch 1")
             # Flatten the tokens
             loss = self.loss_function(
                 logits,
@@ -1568,6 +1638,7 @@ class GraniteMoeHybridForCausalLM(GraniteMoeHybridPreTrainedModel, GenerationMix
 
         aux_loss = None
         if output_router_logits:
+            print("[lm_head] branch 2")
             aux_loss = load_balancing_loss_func(
                 outputs.router_logits,
                 self.num_experts,
@@ -1575,6 +1646,7 @@ class GraniteMoeHybridForCausalLM(GraniteMoeHybridPreTrainedModel, GenerationMix
                 attention_mask,
             )
             if labels is not None:
+                print("[lm_head] branch 3")
                 loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
         return MoeCausalLMOutputWithPast(
             loss=loss,
@@ -1585,6 +1657,7 @@ class GraniteMoeHybridForCausalLM(GraniteMoeHybridPreTrainedModel, GenerationMix
             attentions=outputs.attentions,
             router_logits=outputs.router_logits,
         )
+      
 
     def prepare_inputs_for_generation(
         self,
